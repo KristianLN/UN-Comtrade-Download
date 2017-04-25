@@ -4,6 +4,8 @@ import numpy as np
 import json
 import requests
 import os.path
+import itertools
+from time import sleep
 
 base_url = 'https://comtrade.un.org/api/get?'
 
@@ -45,24 +47,39 @@ def download_trade_data(filename, human_readable=False, verbose=True,
      New fields may be added to the CSV or JSON output formats without warning. Please write your code that accesses the API accordingly.
      """
 
-     # TODO multiple downloads
-
     # (1) replace more convenient input options by ones that can by understood by API
     #     e.g. replace country names by country codes
 
     reporter = transform_reporter(reporter)
     partner = transform_partner(partner)
     tradeflow = transform_tradeflow(tradeflow)
-    # period = transform_period(period, frequency)
+    period = transform_period(period, frequency)
+
+    if sum('all' in inpt for inpt in [reporter, partner, period]) > 1:
+        raise ValueError("Only one of the parameters 'reporter', 'partner' and 'period' may use the special ALL value in a given API call.")
+
+    if any(len(inpt) > 5 for inpt in [reporter, partner, period]) and human_readable:
+        raise Warning("Not recommended!")
 
     # (2)
 
-    dataframe = download_trade_data_base(human_readable=human_readable, verbose=verbose,
-        period=period, frequency=frequency, reporter=reporter, partner=partner, product=product, tradeflow=tradeflow)
+    df = pd.DataFrame()
+
+    lists_of_slice_points = [range(0, len(inpt), 5) for inpt in [reporter, partner, period]]
+
+    for i, j, k in itertools.product(*lists_of_slice_points):
+
+        dataframe = download_trade_data_base(human_readable=human_readable, verbose=verbose,
+            period=period[k:k+5], frequency=frequency, reporter=reporter[i:i+5], partner=partner[j:j+5], product=product, tradeflow=tradeflow)
+
+        if dataframe is not None:
+            df.append(dataframe)
+
+        sleep(1)
 
     # (3)
 
-    if dataframe is not None:
+    if len(dataframe) > 0:
         filename = filename if len(filename.split('.')) == 2 else filename + '.csv' # add '.csv' if necessary
         dataframe.to_csv(filename)
         if verbose: print('{} records downloaded and saved as {}.'.format(len(dataframe), filename))
@@ -168,19 +185,49 @@ def transform_period(period, frequency):
     # [YYYY, 'YYYY-YYYY', 'YYYYY', ...] or some with YYYYMM
     # check whether format corresponds to frequency
 
-    # TODO !
-
     period = [period] if not isinstance(period, list) else period
-    if not len(period) == 1 and period[0] in ['recent', 'all', 'now']:
-        for p in period:
-            if '-' in p:
-                p_splitted = '-'.split(p)
-        if all([isdigit(p) or isinstance(p, int) for p in period]):
+
+    period_new = []
+
+    for p in period:
+
+        if isinstance(p, str) and '-' in p:
+            start, end = p.split('-')
+
+            if frequency.lower() == 'a':
+                y_start = int(start)
+                y_end = int(end)
+                for y in range(y_start, y_end + 1):
+                    period_new.append(y)
+
+            elif frequency.lower() == 'm':
+                y_start, m_start = int(start[:4]), int(start[4:])
+                y_end, m_end = int(end[:4]), int(end[4:])
+                n = (m_end - m_start + 1) + 12 * (y_end - y_start)
+                y, m = y_start, m_start
+                for _ in range(n):
+                    period_new.append('{}{:02d}'.format(y, m))
+                    if m >= 1 and m < 12:
+                        m +=1
+                    elif m == 12:
+                        m = 1
+                        y += 1
+                    else:
+                        raise Exception("Shouldn't get here.")
+
+            else:
+                raise Exception("Frequency neither 'A'/'a' nor 'M'/'m'.")
+
         else:
-            raise ValueError("Input for period is a string but neither 'recent', 'all', 'now' nor a digit!'')
+            period_new.append(p)
 
-    return period
+    return period_new
 
+def is_YYYY(inpt):
+    return True
+
+def is_YYYYMM(inpt):
+    return True
 
 def is_country_code(inpt):
     """
@@ -211,7 +258,8 @@ def find_country_code(country, reporter_or_partner):
     tries to find the country code corresponding to a country name
     procedure: try to find exact match, if not look for partial matches
 
-    input: country name or part of country name (case-sensitive!)
+    input country: country name or part of country name (case-sensitive!)
+    input reporter_or_partner: 'reporter' or 'partner'
     output: country code
     """
 
