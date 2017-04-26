@@ -15,16 +15,17 @@ def download_trade_data(filename, human_readable=False, verbose=True,
 
     """
     Downloads records from the UN Comtrade database and saves them in a csv-file with the name "filename".
+    If necessary, it calls the API several times.
 
     There are two modes:
     - human_readable = False (default): headings in output are not human-readable but error messages from the API are received and displayed
-    - human_readable = True: headings in output are human-readable but we do not get messages from the API about potential problems
+    - human_readable = True: headings in output are human-readable but we do not get messages from the API about potential problems (not recommended if several API calls are necessary)
 
     Additional option: verbose = False in order to suppress both messages from the API and messages like '100 records downloaded and saved in filename.csv' (True is default)
 
-    Parameters of the API call:
+    Parameters:
     Using parameter values suggested in the API documentation should always work.
-    For the parameters reporter, partner and tradeflow more intuitive options have been added.
+    For the parameters period, reporter, partner and tradeflow more intuitive options have been added.
      - period     [ps]   : depending on freq, either YYYY or YYYYMM (or 'YYYY-YYYY'/ 'YYYYMM-YYYYMM' or a list of those) or 'now' or 'recent' (= 5 most recent years/ months) or 'all'
      - frequency  [freq] : 'A' (= annual) or 'M' (= monthly)
      - reporter   [r]    : reporter code/ name (case-sensitive!) or list of reporter codes/ names or 'all' (see https://comtrade.un.org/data/cache/reporterAreas.json)
@@ -48,49 +49,56 @@ def download_trade_data(filename, human_readable=False, verbose=True,
      """
 
     # (1) replace more convenient input options by ones that can by understood by API
-    #     e.g. replace country names by country codes
+    #     e.g. replace country names by country codes or 'YYYYMM-YYYYMM' by a list of months
 
     reporter = transform_reporter(reporter)
     partner = transform_partner(partner)
     tradeflow = transform_tradeflow(tradeflow)
     period = transform_period(period, frequency)
 
+    # (2) warn/ raise an error if appropriate
+
     if sum('all' in inpt for inpt in [reporter, partner, period]) > 1:
         raise ValueError("Only one of the parameters 'reporter', 'partner' and 'period' may use the special ALL value in a given API call.")
 
     if any(len(inpt) > 5 for inpt in [reporter, partner, period]) and human_readable:
-        raise Warning("Not recommended!")
+        print("Using the option human_readable=True is not recommended in this case because several API calls are necessary.")
+        print("When using the human_readable=True option, messages from the API cannot be received!")
+        response = input("Press y if you want to continue anyways. ")
+        if response != 'y':
+            return None # exit function
 
-    # (2)
+    # (3) download data by doing one or several API calls
 
-    df = pd.DataFrame()
+    dfs = []
 
-    lists_of_slice_points = [range(0, len(inpt), 5) for inpt in [reporter, partner, period]]
+    slice_points = [range(0, len(inpt), 5) for inpt in [reporter, partner, period]]
+    # since these parameters are limited to 5 inputs each
 
-    for i, j, k in itertools.product(*lists_of_slice_points):
+    for i, j, k in itertools.product(*slice_points):
 
-        dataframe = download_trade_data_base(human_readable=human_readable, verbose=verbose,
+        df = download_trade_data_base(human_readable=human_readable, verbose=verbose,
             period=period[k:k+5], frequency=frequency, reporter=reporter[i:i+5], partner=partner[j:j+5], product=product, tradeflow=tradeflow)
 
-        if dataframe is not None:
-            df.append(dataframe)
+        if df is not None:
+            dfs.append(df)
 
-        sleep(1)
+        sleep(1) # wait 1 second because of API rate limit
 
-    # (3)
+    # (4) save dataframe as csv file
 
-    if len(dataframe) > 0:
+    if len(dfs) > 0:
+        df_all = pd.concat(dfs)
         filename = filename if len(filename.split('.')) == 2 else filename + '.csv' # add '.csv' if necessary
-        dataframe.to_csv(filename)
-        if verbose: print('{} records downloaded and saved as {}.'.format(len(dataframe), filename))
+        df_all.to_csv(filename)
+        if verbose: print('{} records downloaded and saved as {}.'.format(len(df_all), filename))
 
 
 def download_trade_data_base(human_readable=False, verbose=True,
     period='recent', frequency='A', reporter=842, partner='all', product='total', tradeflow=2):
 
     """
-
-    Downloads records from the UN Comtrade database and returns pandas dataframe.
+    Downloads records from the UN Comtrade database and returns pandas dataframe using one API call.
 
     There are two modes:
     - human_readable = False (default): headings in output are not human-readable but error messages from the API are received and displayed
@@ -100,14 +108,13 @@ def download_trade_data_base(human_readable=False, verbose=True,
 
     Parameters of the API call:
     As documented in the API documentation.
-    More intuitive options for the parameters reporter, partner and tradeflow are only available in the function 'download_trade_data'!
+    More intuitive options for the parameters period, reporter, partner and tradeflow are only available in the function 'download_trade_data'!
      - period     [ps]   : depending on freq, either YYYY or YYYYMM (or a list of those) or 'now' or 'recent' (= 5 most recent years/ months) or 'all'
      - frequency  [freq] : 'A' (= annual) or 'M' (= monthly)
      - reporter   [r]    : reporter code or list of reporter codes or 'all' (see https://comtrade.un.org/data/cache/reporterAreas.json)
      - partner    [p]    : partner code or list of partner codes or 'all' (see https://comtrade.un.org/data/cache/partnerAreas.json)
      - product    [cc]   : commodity code valid in the selected classification (here: Harmonized System HS) or 'total' (= aggregated) or 'all'
      - tradeflow  [rg]   : 1 (for imports) or 2 (for exports); see https://comtrade.un.org/data/cache/tradeRegimes.json for further options
-
     """
 
     fmt = 'csv' if human_readable else 'json'
@@ -129,6 +136,8 @@ def download_trade_data_base(human_readable=False, verbose=True,
     }
 
     url = base_url + dict_to_string(parameters)
+
+    if verbose: print(url)
 
     if human_readable:
 
@@ -153,22 +162,33 @@ def download_trade_data_base(human_readable=False, verbose=True,
 
 ###############################################################################
 
+
 def transform_reporter(reporter):
+    """
+    replaces country names in reporter by the corresponding country codes
+    """
     # if single country code/ name, convert to list
     reporter = [reporter] if not isinstance(reporter, list) else reporter
     # replace country names by country codes
     reporter = [r if is_country_code(r) else find_reporter_code(r) for r in reporter]
     return reporter
 
+
 def transform_partner(partner):
+    """
+    replaces country names in partner by the corresponding country codes
+    """
     # if single country code/ name, convert to list
     partner = [partner] if not isinstance(partner, list) else partner
     # replace country names by country codes
     partner = [p if is_country_code(p) else find_partner_code(p) for p in partner]
     return partner
 
+
 def transform_tradeflow(tradeflow):
-    # replace tradeflow "import(s)" or "export(s)" by the corresponding numbers (1 / 2)
+    """
+    replace tradeflow "import(s)" or "export(s)" by the corresponding numbers (1 / 2)
+    """
     if isinstance(tradeflow, str):
         if 'export' in tradeflow.lower():
             tradeflow = 2
@@ -176,14 +196,14 @@ def transform_tradeflow(tradeflow):
             tradeflow = 1
     return tradeflow
 
-def transform_period(period, frequency):
 
-    # possibilities:
-    # ['recent'], 'recent' (similar: 'now' and 'all')
-    # YYYY/ YYYYMM (both int and str, both as single element of list or single object)
-    # 'YYYY-YYYY' or 'YYYYMM-YYYYMM' (only str, both as single element of list or single object)
-    # [YYYY, 'YYYY-YYYY', 'YYYYY', ...] or some with YYYYMM
-    # check whether format corresponds to frequency
+def transform_period(period, frequency):
+    """
+    detects 'YYYY-YYYY' or 'YYYYMM-YYYYMM' inputs and transforms them into lists of YYYY or YYYYMM that the API can understand
+    the function does not check whether the other inputs for period are valid!
+    period: depending on freq, either YYYY or YYYYMM (or 'YYYY-YYYY'/ 'YYYYMM-YYYYMM' or a list of those) or 'now' or 'recent' or 'all'
+    frequency: 'A' or 'M'
+    """
 
     period = [period] if not isinstance(period, list) else period
 
@@ -223,11 +243,6 @@ def transform_period(period, frequency):
 
     return period_new
 
-def is_YYYY(inpt):
-    return True
-
-def is_YYYYMM(inpt):
-    return True
 
 def is_country_code(inpt):
     """
@@ -245,6 +260,7 @@ def find_reporter_code(country):
     see 'find_country_code'
     """
     return find_country_code(country, 'reporter')
+
 
 def find_partner_code(country):
     """
