@@ -30,7 +30,7 @@ def download_trade_data(filename, human_readable=False, verbose=True,
      - frequency  [freq] : 'A' (= annual) or 'M' (= monthly)
      - reporter   [r]    : reporter code/ name (case-sensitive!) or list of reporter codes/ names or 'all' (see https://comtrade.un.org/data/cache/reporterAreas.json)
      - partner    [p]    : partner code/ name  (case-sensitive!) or list of partner codes/ names or 'all' (see https://comtrade.un.org/data/cache/partnerAreas.json)
-     - product    [cc]   : commodity code valid in the selected classification (here: Harmonized System HS) or 'total' (= aggregated) or 'all'
+     - product    [cc]   : commodity code valid in the selected classification (here: Harmonized System HS) or 'total' (= aggregated) or 'all' or 'HG2', 'HG4' or 'HG6' (= all 2-, 4- and 6-digit HS commodities)
      - tradeflow  [rg]   : 'import[s]' or 'export[s]'; see https://comtrade.un.org/data/cache/tradeRegimes.json for further, lower-level options
 
      Information copied from the API Documentation (https://comtrade.un.org/data/doc/api/):
@@ -72,13 +72,17 @@ def download_trade_data(filename, human_readable=False, verbose=True,
 
     dfs = []
 
-    slice_points = [range(0, len(inpt), 5) for inpt in [reporter, partner, period]]
-    # since these parameters are limited to 5 inputs each
+    slice_points = [range(0, len(inpt), 5) for inpt in [reporter, partner, period]] + \
+        [range(0, len(product), 20)]
+    # since the parameters reporter, partner and period are limited to 5 inputs each and
+    # product is limited to 20 inputs
 
-    for i, j, k in itertools.product(*slice_points):
+    for i, j, k, m in itertools.product(*slice_points):
 
         df = download_trade_data_base(human_readable=human_readable, verbose=verbose,
-            period=period[k:k+5], frequency=frequency, reporter=reporter[i:i+5], partner=partner[j:j+5], product=product, tradeflow=tradeflow)
+            period=period[k:k+5], reporter=reporter[i:i+5],
+            partner=partner[j:j+5], product=product[m:m+20],
+            tradeflow=tradeflow, frequency=frequency, )
 
         if df is not None:
             dfs.append(df)
@@ -113,7 +117,7 @@ def download_trade_data_base(human_readable=False, verbose=True,
      - frequency  [freq] : 'A' (= annual) or 'M' (= monthly)
      - reporter   [r]    : reporter code or list of reporter codes or 'all' (see https://comtrade.un.org/data/cache/reporterAreas.json)
      - partner    [p]    : partner code or list of partner codes or 'all' (see https://comtrade.un.org/data/cache/partnerAreas.json)
-     - product    [cc]   : commodity code valid in the selected classification (here: Harmonized System HS) or 'total' (= aggregated) or 'all'
+     - product    [cc]   : commodity code valid in the selected classification (here: Harmonized System HS) or 'total' (= aggregated) or 'all' or 'HG2', 'HG4' or 'HG6' (= all 2-, 4- and 6-digit HS commodities)
      - tradeflow  [rg]   : 1 (for imports) or 2 (for exports); see https://comtrade.un.org/data/cache/tradeRegimes.json for further options
     """
 
@@ -159,6 +163,7 @@ def download_trade_data_base(human_readable=False, verbose=True,
             dataframe = pd.DataFrame.from_dict(json_dict['dataset'])
 
     return dataframe
+
 
 ###############################################################################
 
@@ -311,7 +316,7 @@ def find_country_code(country, reporter_or_partner):
 
 def download_country_codes_file(reporter_or_partner):
     """
-    downloads either the reporter or the partner file
+    downloads either the reporter or the partner file and saves it in the current directory
     input: 'reporter' or 'partner'
     """
     url = 'https://comtrade.un.org/data/cache/{}Areas.json'.format(reporter_or_partner)
@@ -320,7 +325,6 @@ def download_country_codes_file(reporter_or_partner):
     df = df.set_index('id')
     df.drop('all', inplace=True)
     df.to_csv('{}Areas.csv'.format(reporter_or_partner))
-
 
 def dict_item_to_string(key, value):
     """
@@ -338,3 +342,65 @@ def dict_to_string(parameters):
     output: string 'key1=value1&key2=value2&...'
     """
     return '&'.join(dict_item_to_string(key, value) for key, value in parameters.items())
+
+
+###############################################################################
+
+
+def product_codes_with_parent(parent_code):
+    """
+    Returns a python dictionary with all entries that belong to parent_code.
+    """
+    if not os.path.exists('classificationHS.csv'):
+        download_product_codes_file()
+    df = load_product_codes_file()
+    mask = df.parent == parent_code
+    return df.text[mask].to_dict()
+
+def search_product_code(pat, case=True, flags=0, regex=True, n_digits=None):
+    """
+    Returns a python dictionary with all entries that contain the pattern pat and have a code with length n_digits.
+    If n_digits = None (default), we do not care about how many digits the classification code has.
+
+    For searching for the pattern pat, we use pd.Series.str.contains which takes the following parameters:
+
+    pat : string
+        Character sequence or regular expression
+    case : boolean, default True
+        If True, case sensitive
+    flags : int, default 0 (no flags)
+        re module flags, e.g. re.IGNORECASE
+    regex : bool, default True
+        If True use re.search, otherwise use Python in operator
+    """
+    if not os.path.exists('classificationHS.csv'):
+        download_product_codes_file()
+    df = load_product_codes_file()
+    if n_digits is not None:
+        mask1 = df.text.str.contains(pat, case=case, flags=flags, regex=regex)
+        mask2 = df.index.to_series().apply(lambda digit: len(digit) == n_digits)
+        mask = mask1 & mask2
+    else: mask = df.text.str.contains(pat, case=case, flags=flags, regex=regex)
+    return df.text[mask].to_dict()
+
+
+def load_product_codes_file():
+    """
+    Loads the product codes file as a pandas dataframe.
+    """
+    df = pd.read_csv('classificationHS.csv', encoding='latin-1', index_col='id')
+    return df
+
+
+def download_product_codes_file():
+    """
+    Downloads the product codes files and saves it in the current directory.
+    The short-cut entries for 'ALL', 'TOTAL', 'AG2', 'AG4' and 'AG6' are deleted.
+    """
+    url = 'https://comtrade.un.org/data/cache/classificationHS.json'
+    json_dict = requests.get(url).json()
+    df = pd.DataFrame.from_dict(json_dict['results'])
+    df = df.set_index('id')
+    df.drop(['ALL', 'TOTAL', 'AG2', 'AG4', 'AG6'], inplace=True)
+    df.text = df.text.apply(lambda x: ' - '.join(x.split(' - ')[1:])) # remove digits from beginning of text
+    df.to_csv('classificationHS.csv')
